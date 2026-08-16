@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#111827">
+  <title>Animador IA</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <main class="app">
+    <header class="hero">
+      <div class="logo">🎙️</div>
+      <div>
+        <h1>ANIMADOR <span>IA</span></h1>
+        <p>Crea anuncios con voz de animador</p>
+      </div>
+    </header>
+
+    <section class="card">
+      <label for="brief">¿Qué quieres anunciar?</label>
+      <textarea id="brief" rows="7"
+        placeholder="Ejemplo: Gran apertura de Parrillas, este sábado desde las 9 pm, música en vivo, ven con toda tu familia..."></textarea>
+
+      <div class="grid">
+        <div>
+          <label for="style">🎤 Estilo</label>
+          <select id="style">
+            <option value="animador">Animador alegre</option>
+            <option value="fiesta">Fiesta / explosivo</option>
+            <option value="comercial">Locutor comercial</option>
+            <option value="orquesta">Presentación de orquesta</option>
+          </select>
+        </div>
+
+        <div>
+          <label for="energy">⚡ Energía</label>
+          <select id="energy">
+            <option value="suave">Suave</option>
+            <option value="media" selected>Media</option>
+            <option value="alta">Explosiva</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button id="generateText" class="primary">✨ GENERAR TEXTO</button>
+        <button id="speak" class="secondary">🔊 ESCUCHAR</button>
+        <button id="stop" class="ghost">⏹ DETENER</button>
+      </div>
+    </section>
+
+    <section class="card">
+      <div class="section-title">
+        <h2>📝 Guion del animador</h2>
+        <button id="copy" class="mini">Copiar</button>
+      </div>
+      <textarea id="script" rows="10"
+        placeholder="Aquí aparecerá el texto preparado por Animador IA..."></textarea>
+    </section>
+
+    <section class="card">
+      <h2>🎚️ Preparación de voz</h2>
+      <div class="range-row">
+        <span>Velocidad</span>
+        <input id="rate" type="range" min="0.7" max="1.35" step="0.05" value="1">
+        <strong id="rateValue">1.00x</strong>
+      </div>
+      <div class="range-row">
+        <span>Tono</span>
+        <input id="pitch" type="range" min="0.6" max="1.4" step="0.05" value="0.9">
+        <strong id="pitchValue">0.90</strong>
+      </div>
+
+      <label for="voice">🗣️ Voz disponible en tu dispositivo</label>
+      <select id="voice"></select>
+
+      <p class="note">
+        Esta primera versión usa la voz TTS disponible en el navegador.
+        En la siguiente fase conectaremos una voz IA real y exportación MP3.
+      </p>
+    </section>
+
+    <footer>Animador IA · Versión 1.0</footer>
+  </main>
+
+  <script src="script.js"></script>
+</body>
+</html>
