@@ -78,7 +78,7 @@ app.post("/api/voice/generate", (req, res) => {
   });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0",() => {
   console.log(
     `Animador IA Backend escuchando en http://localhost:${PORT}`
   );
