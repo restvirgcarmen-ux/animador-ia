@@ -18,7 +18,11 @@ $("rate").oninput=()=>$("rv").textContent=(+$("rate").value).toFixed(2)+"x";$("p
 let db,rec,stream,ch=[],editing=null;
 let recording=false;
 let preparing=false;
-let pendingRecorderToken=0;
+let audioCtx=null;
+let sourceNode=null;
+let processorNode=null;
+let recordedSamples=[];
+let recordedSampleRate=44100;
 
 function openDB(){return new Promise((ok,no)=>{
   const r=indexedDB.open("AnimadorIA",1);
@@ -43,65 +47,56 @@ function del(id){return new Promise((ok,no)=>{
   r.onsuccess=ok;r.onerror=()=>no(r.error)
 })}
 
-function audioType(file){return file.type||"audio/webm"}
+function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
 
 async function saveVoiceBlob(blob,name,id){
   if(!blob || !blob.size) throw Error("La grabación está vacía.");
-  await put({id:id||crypto.randomUUID(),name,blob,date:Date.now(),mime:blob.type||"audio/webm"});
+  await put({id:id||crypto.randomUUID(),name,blob,date:Date.now(),mime:blob.type||"audio/wav"});
   await render();
-}
-
-function stopStream(){
-  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
 }
 
 async function render(){
   const list=await all(),el=$("voices");
   el.innerHTML=list.length?"":"<p>Aún no hay voces almacenadas.</p>";
-
   list.forEach(v=>{
     const d=document.createElement("div");
     d.className="voice";
-    const isRecordingThis=(recording || preparing) && editing===v.id;
-
-    d.innerHTML=`<b>🎙️ ${escapeHtml(v.name)}</b> <span class="ready">${preparing && editing===v.id ? "🎙️ Preparando..." : (recording && editing===v.id ? "🔴 Grabando..." : "● Lista")}</span>
-      <div class="meta">${preparing && editing===v.id ? "Preparando el micrófono..." : (recording && editing===v.id ? "La muestra anterior está oculta mientras grabas una nueva." : "Muestra almacenada localmente")}</div>
-      <audio controls preload="none" ${isRecordingThis?"hidden":""}></audio>
+    const active=recording && editing===v.id;
+    const preparingThis=preparing && editing===v.id;
+    d.innerHTML=`<b>🎙️ ${escapeHtml(v.name)}</b> <span class="ready">${preparingThis?"🎙️ Preparando...":(active?"🔴 Grabando...":"● Lista")}</span>
+      <div class="meta">${preparingThis?"Preparando el micrófono...":(active?"La muestra anterior está oculta mientras grabas una nueva.":"Muestra almacenada localmente")}</div>
+      <audio controls preload="metadata" ${active||preparingThis?"hidden":""}></audio>
       <div>
-        <button data-r="${v.id}">${isRecordingThis?"⏹ Detener":"🔄 Regrabar"}</button>
-        <button data-u="${v.id}" ${isRecordingThis?"disabled":""}>📁 Reemplazar archivo</button>
-        <button class="danger" data-d="${v.id}" ${isRecordingThis?"disabled":""}>🗑️ Eliminar</button>
+        <button data-r="${v.id}">${active?"⏹ Detener":"🔄 Regrabar"}</button>
+        <button data-u="${v.id}" ${active||preparingThis?"disabled":""}>📁 Reemplazar archivo</button>
+        <button class="danger" data-d="${v.id}" ${active||preparingThis?"disabled":""}>🗑️ Eliminar</button>
       </div>`;
     const audio=d.querySelector("audio");
-    if(!isRecordingThis) audio.src=URL.createObjectURL(v.blob);
+    if(!active&&!preparingThis){
+      try{audio.src=URL.createObjectURL(v.blob)}catch{}
+    }
     el.appendChild(d);
   });
 
   el.querySelectorAll("[data-d]").forEach(b=>b.onclick=async()=>{
     if(confirm("¿Eliminar esta voz almacenada?")){
       await del(b.dataset.d);
-      if(editing===b.dataset.d) cancelRecorder();
-      else await render();
+      if(editing===b.dataset.d) cancelRecorder(); else await render();
     }
   });
-
   el.querySelectorAll("[data-r]").forEach(b=>b.onclick=async()=>{
     const id=b.dataset.r;
-    if(recording && editing===id){stopRecording();return}
+    if(recording && editing===id){await stopRecording();return}
     await openRecorder(id);
   });
-
   el.querySelectorAll("[data-u]").forEach(b=>b.onclick=()=>openRecorder(b.dataset.u));
 }
 
-function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-
 async function openRecorder(id=null){
-  if(recording) return;
+  if(recording||preparing)return;
   editing=id;
   const list=await all();
   const existing=list.find(v=>v.id===id);
-
   $("voiceName").value=existing?.name||"";
   $("consent").checked=false;
   $("recTitle").textContent=existing?"Regrabar voz":"Nueva voz";
@@ -115,13 +110,18 @@ async function openRecorder(id=null){
 
 $("addVoice").onclick=()=>openRecorder();
 
+function cleanupAudio(){
+  try{sourceNode?.disconnect()}catch{}
+  try{processorNode?.disconnect()}catch{}
+  sourceNode=null;processorNode=null;
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+  if(audioCtx){try{audioCtx.close()}catch{} audioCtx=null}
+}
+
 function cancelRecorder(){
-  pendingRecorderToken++;
-  preparing=false;
-  recording=false;
-  stopStream();
-  if(rec && rec.state!=="inactive"){try{rec.onstop=null;rec.stop()}catch{}}
-  rec=null;ch=[];recording=false;
+  recording=false;preparing=false;
+  cleanupAudio();
+  recordedSamples=[];
   $("record").textContent="🎙️ GRABAR MUESTRA";
   $("recorder").hidden=true;
   $("audioInput").value="";
@@ -130,160 +130,103 @@ function cancelRecorder(){
 
 $("cancel").onclick=cancelRecorder;
 
+function mergeFloat32(chunks){
+  let len=0;chunks.forEach(a=>len+=a.length);
+  const out=new Float32Array(len);let o=0;
+  chunks.forEach(a=>{out.set(a,o);o+=a.length});
+  return out;
+}
+
+function encodeWav(samples,sampleRate){
+  const buffer=new ArrayBuffer(44+samples.length*2);
+  const view=new DataView(buffer);
+  const write=(offset,str)=>{for(let i=0;i<str.length;i++)view.setUint8(offset+i,str.charCodeAt(i))};
+  write(0,"RIFF");view.setUint32(4,36+samples.length*2,true);write(8,"WAVE");
+  write(12,"fmt ");view.setUint32(16,16,true);view.setUint16(20,1,true);view.setUint16(22,1,true);
+  view.setUint32(24,sampleRate,true);view.setUint32(28,sampleRate*2,true);view.setUint16(32,2,true);view.setUint16(34,16,true);
+  write(36,"data");view.setUint32(40,samples.length*2,true);
+  let off=44;
+  for(let i=0;i<samples.length;i++){
+    let x=Math.max(-1,Math.min(1,samples[i]));
+    view.setInt16(off,x<0?x*0x8000:x*0x7fff,true);off+=2;
+  }
+  return new Blob([view],{type:"audio/wav"});
+}
+
 async function stopRecording(){
-  if(!rec || rec.state!=="recording") return;
+  if(!recording||!audioCtx)return;
   $("status").textContent="⏳ Procesando la grabación...";
   $("record").textContent="⏳ GUARDANDO...";
-  rec.stop();
+  recording=false;
+  try{
+    const samples=mergeFloat32(recordedSamples);
+    const blob=encodeWav(samples,recordedSampleRate);
+    cleanupAudio();
+    recordedSamples=[];
+    if(!blob.size || samples.length<1000)throw Error("La grabación está vacía o es demasiado corta.");
+    await saveVoiceBlob(blob,$("voiceName").value.trim(),editing);
+    $("status").textContent="✅ Muestra guardada correctamente.";
+    $("recorder").hidden=true;
+  }catch(e){
+    cleanupAudio();recordedSamples=[];
+    $("status").textContent="❌ No se pudo guardar la grabación: "+(e.message||"error");
+    await render();
+  }
 }
 
 $("record").onclick=async()=>{
   if(recording){await stopRecording();return}
   if(preparing)return;
-
-  if(!$("consent").checked){
-    $("status").textContent="Marca la autorización primero.";
-    return;
-  }
-
+  if(!$("consent").checked){$("status").textContent="Marca la autorización primero.";return}
   const name=$("voiceName").value.trim();
-  if(!name){
-    $("status").textContent="Escribe un nombre para la voz.";
-    return;
-  }
-
-  if(!navigator.mediaDevices?.getUserMedia){
-    $("status").textContent="Este navegador no permite acceder al micrófono.";
-    return;
-  }
-
-  const token=++pendingRecorderToken;
+  if(!name){$("status").textContent="Escribe un nombre para la voz.";return}
+  if(!navigator.mediaDevices?.getUserMedia){$("status").textContent="Este navegador no permite acceder al micrófono.";return}
 
   try{
+    preparing=true;
     $("status").textContent="🎙️ Solicitando permiso para usar el micrófono...";
     $("record").textContent="⏳ PREPARANDO...";
-
-    // This call triggers the browser's microphone permission prompt when permission
-    // has not already been granted.
-    stream=await navigator.mediaDevices.getUserMedia({
-      audio:{
-        channelCount:1,
-        echoCancellation:true,
-        noiseSuppression:true,
-        autoGainControl:true
-      }
-    });
-
-    if(token!==pendingRecorderToken){stopStream();return}
-
-    ch=[];
-    const preferred=[
-      "audio/webm;codecs=opus",
-      "audio/webm",
-      "audio/mp4"
-    ];
-    const mime=preferred.find(x=>window.MediaRecorder?.isTypeSupported?.(x))||"";
-
-    rec=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream);
-    preparing=true;
-
-    // Hide the old player while the microphone settles. This short warm-up
-    // helps avoid the click/chillido that some phones produce at startup.
     await render();
-    await new Promise(resolve=>setTimeout(resolve,700));
-    if(token!==pendingRecorderToken){stopStream();preparing=false;rec=null;await render();return}
 
-    rec.ondataavailable=e=>{if(e.data?.size)ch.push(e.data)};
-
-    rec.onerror=()=>{
-      $("status").textContent="❌ Ocurrió un error durante la grabación.";
+    stream=await navigator.mediaDevices.getUserMedia({audio:{channelCount:1,echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+    audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+    if(audioCtx.state==="suspended")await audioCtx.resume();
+    recordedSampleRate=audioCtx.sampleRate;
+    sourceNode=audioCtx.createMediaStreamSource(stream);
+    processorNode=audioCtx.createScriptProcessor(4096,1,1);
+    recordedSamples=[];
+    processorNode.onaudioprocess=e=>{
+      if(!recording)return;
+      recordedSamples.push(new Float32Array(e.inputBuffer.getChannelData(0)));
     };
+    const silentGain=audioCtx.createGain();silentGain.gain.value=0;
+    sourceNode.connect(processorNode);
+    processorNode.connect(silentGain);
+    silentGain.connect(audioCtx.destination);
 
-    rec.onstop=async()=>{
-      const localRec=rec;
-      const localStream=stream;
-      const parts=ch.slice();
-
-      rec=null;
-      stream=null;
-      recording=false;
-      preparing=false;
-      ch=[];
-
-      localStream?.getTracks().forEach(t=>t.stop());
-
-      $("record").textContent="🎙️ GRABAR MUESTRA";
-
-      try{
-        const blob=new Blob(parts,{type:localRec?.mimeType||"audio/webm"});
-        if(!blob.size) throw Error("La grabación está vacía.");
-
-        await saveVoiceBlob(blob,name,editing);
-        $("status").textContent="✅ Muestra guardada correctamente.";
-        $("recorder").hidden=true;
-      }catch(err){
-        $("status").textContent="❌ No se pudo guardar la grabación.";
-        await render();
-      }
-    };
-
-    rec.start(250);
-    preparing=false;
-    recording=true;
+    preparing=false;recording=true;
     await render();
     $("record").textContent="⏹ DETENER GRABACIÓN";
     $("status").textContent="🔴 Grabando... Habla ahora.";
   }catch(e){
-    stopStream();
-    rec=null;
-    recording=false;
-    preparing=false;
+    preparing=false;recording=false;cleanupAudio();recordedSamples=[];
     $("record").textContent="🎙️ GRABAR MUESTRA";
-
-    if(e?.name==="NotAllowedError" || e?.name==="PermissionDeniedError"){
-      $("status").textContent="❌ El micrófono no fue autorizado. Revisa el permiso de micrófono del navegador para esta página.";
-    }else if(e?.name==="NotFoundError"){
-      $("status").textContent="❌ No se encontró un micrófono disponible.";
-    }else{
-      $("status").textContent="❌ No se pudo acceder al micrófono.";
-    }
+    if(e?.name==="NotAllowedError"||e?.name==="PermissionDeniedError")$("status").textContent="❌ El micrófono no fue autorizado. Revisa el permiso de micrófono del navegador para esta página.";
+    else if(e?.name==="NotFoundError")$("status").textContent="❌ No se encontró un micrófono disponible.";
+    else $("status").textContent="❌ No se pudo acceder al micrófono: "+(e.message||"error");
     await render();
   }
 };
 
 $("audioInput").onchange=async e=>{
-  const file=e.target.files?.[0];
-  if(!file)return;
-
-  if(!$("consent").checked){
-    $("status").textContent="Marca la autorización primero.";
-    e.target.value="";
-    return;
-  }
-
+  const file=e.target.files?.[0];if(!file)return;
+  if(!$("consent").checked){$("status").textContent="Marca la autorización primero.";e.target.value="";return}
   const name=$("voiceName").value.trim()||"Mi voz";
-
-  if(file.size>15*1024*1024){
-    $("status").textContent="El archivo supera 15 MB.";
-    e.target.value="";
-    return;
-  }
-
-  if(!file.type.startsWith("audio/")){
-    $("status").textContent="Selecciona un archivo de audio válido.";
-    e.target.value="";
-    return;
-  }
-
-  try{
-    await saveVoiceBlob(file,name,editing);
-    $("recorder").hidden=true;
-    $("status").textContent="✅ Archivo de voz guardado correctamente.";
-  }catch(err){
-    $("status").textContent="❌ No se pudo guardar el archivo.";
-  }
+  if(file.size>15*1024*1024){$("status").textContent="El archivo supera 15 MB.";e.target.value="";return}
+  if(!file.type.startsWith("audio/")){$("status").textContent="Selecciona un archivo de audio válido.";e.target.value="";return}
+  try{await saveVoiceBlob(file,name,editing);$("recorder").hidden=true;$("status").textContent="Archivo de voz guardado."}
+  catch(err){$("status").textContent="No se pudo guardar el archivo."}
   e.target.value="";
 };
 
 openDB().then(render);
-
