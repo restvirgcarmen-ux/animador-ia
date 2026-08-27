@@ -17,6 +17,7 @@ $("rate").oninput=()=>$("rv").textContent=(+$("rate").value).toFixed(2)+"x";$("p
 
 let db,rec,stream,ch=[],editing=null;
 let recording=false;
+let preparing=false;
 let pendingRecorderToken=0;
 
 function openDB(){return new Promise((ok,no)=>{
@@ -61,10 +62,10 @@ async function render(){
   list.forEach(v=>{
     const d=document.createElement("div");
     d.className="voice";
-    const isRecordingThis=recording && editing===v.id;
+    const isRecordingThis=(recording || preparing) && editing===v.id;
 
-    d.innerHTML=`<b>🎙️ ${escapeHtml(v.name)}</b> <span class="ready">${isRecordingThis?"🔴 Grabando...":"● Lista"}</span>
-      <div class="meta">${isRecordingThis?"La muestra anterior está oculta mientras grabas una nueva.":"Muestra almacenada localmente"}</div>
+    d.innerHTML=`<b>🎙️ ${escapeHtml(v.name)}</b> <span class="ready">${preparing && editing===v.id ? "🎙️ Preparando..." : (recording && editing===v.id ? "🔴 Grabando..." : "● Lista")}</span>
+      <div class="meta">${preparing && editing===v.id ? "Preparando el micrófono..." : (recording && editing===v.id ? "La muestra anterior está oculta mientras grabas una nueva." : "Muestra almacenada localmente")}</div>
       <audio controls preload="none" ${isRecordingThis?"hidden":""}></audio>
       <div>
         <button data-r="${v.id}">${isRecordingThis?"⏹ Detener":"🔄 Regrabar"}</button>
@@ -116,6 +117,8 @@ $("addVoice").onclick=()=>openRecorder();
 
 function cancelRecorder(){
   pendingRecorderToken++;
+  preparing=false;
+  recording=false;
   stopStream();
   if(rec && rec.state!=="inactive"){try{rec.onstop=null;rec.stop()}catch{}}
   rec=null;ch=[];recording=false;
@@ -136,6 +139,7 @@ async function stopRecording(){
 
 $("record").onclick=async()=>{
   if(recording){await stopRecording();return}
+  if(preparing)return;
 
   if(!$("consent").checked){
     $("status").textContent="Marca la autorización primero.";
@@ -181,10 +185,13 @@ $("record").onclick=async()=>{
     const mime=preferred.find(x=>window.MediaRecorder?.isTypeSupported?.(x))||"";
 
     rec=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream);
-    recording=true;
+    preparing=true;
 
-    // Hide the old player immediately and show the recording state.
+    // Hide the old player while the microphone settles. This short warm-up
+    // helps avoid the click/chillido that some phones produce at startup.
     await render();
+    await new Promise(resolve=>setTimeout(resolve,700));
+    if(token!==pendingRecorderToken){stopStream();preparing=false;rec=null;await render();return}
 
     rec.ondataavailable=e=>{if(e.data?.size)ch.push(e.data)};
 
@@ -200,6 +207,7 @@ $("record").onclick=async()=>{
       rec=null;
       stream=null;
       recording=false;
+      preparing=false;
       ch=[];
 
       localStream?.getTracks().forEach(t=>t.stop());
@@ -220,12 +228,16 @@ $("record").onclick=async()=>{
     };
 
     rec.start(250);
+    preparing=false;
+    recording=true;
+    await render();
     $("record").textContent="⏹ DETENER GRABACIÓN";
     $("status").textContent="🔴 Grabando... Habla ahora.";
   }catch(e){
     stopStream();
     rec=null;
     recording=false;
+    preparing=false;
     $("record").textContent="🎙️ GRABAR MUESTRA";
 
     if(e?.name==="NotAllowedError" || e?.name==="PermissionDeniedError"){
