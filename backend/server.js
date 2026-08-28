@@ -30,4 +30,4 @@ app.post("/api/voice/generate",(req,res)=>res.status(501).json({
   nextStep:"Conectar un proveedor TTS/voice-cloning mediante variables de entorno seguras."
 }));
 
-app.listen(PORT,()=>console.log(`Animador IA Backend: http://localhost:${PORT}`));
+app.listen(PORT, "0.0.0.0", ()=>console.log(`Animador IA Backend: http://localhost:${PORT}`));
