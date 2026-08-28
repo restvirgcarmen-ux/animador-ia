@@ -1,15 +1,14 @@
-# Animador IA — Backend V1
+# Animador IA Backend V4
 
-Base inicial del servidor.
+Backend Express para Animador IA.
 
-Incluye:
-- GET /api/health
-- POST /api/generate-script
-- POST /api/voice/generate (reservado para el motor de voz IA)
+## Variables de entorno
+- `OPENAI_API_KEY`: clave de API guardada como secreto en Render.
+- `OPENAI_MODEL`: modelo multimodal (por defecto `gpt-5.6`).
 
-Las claves API se configurarán después como variables secretas del servidor; nunca dentro del código.
+## Endpoints
+- `GET /api/health`
+- `POST /api/generate-script`
+- `POST /api/generate-script-from-image`
 
-Para ejecutar localmente:
-1. cd backend
-2. npm install
-3. npm start
+No guardes claves API en el frontend ni en GitHub.
