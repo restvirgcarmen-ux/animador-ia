@@ -16,17 +16,274 @@ $("stop").onclick=()=>speechSynthesis.cancel();$("copy").onclick=async()=>{await
 $("rate").oninput=()=>$("rv").textContent=(+$("rate").value).toFixed(2)+"x";$("pitch").oninput=()=>$("pv").textContent=(+$("pitch").value).toFixed(2);
 
 let db,rec,stream,ch=[],editing=null;
-function openDB(){return new Promise((ok,no)=>{const r=indexedDB.open("AnimadorIA",1);r.onupgradeneeded=()=>r.result.createObjectStore("voices",{keyPath:"id"});r.onsuccess=()=>{db=r.result;ok()};r.onerror=()=>no(r.error)})}
-function all(){return new Promise(ok=>{const r=db.transaction("voices").objectStore("voices").getAll();r.onsuccess=()=>ok(r.result)})}
-function put(v){return new Promise((ok,no)=>{const r=db.transaction("voices","readwrite").objectStore("voices").put(v);r.onsuccess=ok;r.onerror=()=>no(r.error)})}
-function del(id){return new Promise((ok,no)=>{const r=db.transaction("voices","readwrite").objectStore("voices").delete(id);r.onsuccess=ok;r.onerror=()=>no(r.error)})}
+let recording=false;
+let preparing=false;
+let pendingRecorderToken=0;
+
+function openDB(){return new Promise((ok,no)=>{
+  const r=indexedDB.open("AnimadorIA",1);
+  r.onupgradeneeded=()=>{if(!r.result.objectStoreNames.contains("voices"))r.result.createObjectStore("voices",{keyPath:"id"})};
+  r.onsuccess=()=>{db=r.result;ok()};
+  r.onerror=()=>no(r.error)
+})}
+
+function all(){return new Promise((ok,no)=>{
+  const r=db.transaction("voices").objectStore("voices").getAll();
+  r.onsuccess=()=>ok(r.result);
+  r.onerror=()=>no(r.error)
+})}
+
+function put(v){return new Promise((ok,no)=>{
+  const r=db.transaction("voices","readwrite").objectStore("voices").put(v);
+  r.onsuccess=ok;r.onerror=()=>no(r.error)
+})}
+
+function del(id){return new Promise((ok,no)=>{
+  const r=db.transaction("voices","readwrite").objectStore("voices").delete(id);
+  r.onsuccess=ok;r.onerror=()=>no(r.error)
+})}
+
 function audioType(file){return file.type||"audio/webm"}
-async function saveVoiceBlob(blob,name,id){await put({id:id||crypto.randomUUID(),name,blob,date:Date.now(),mime:blob.type||"audio/webm"});render()}
-async function render(){const list=await all(),el=$("voices");el.innerHTML=list.length?"":"<p>Aún no hay voces almacenadas.</p>";list.forEach(v=>{const d=document.createElement("div");d.className="voice";d.innerHTML=`<b>🎙️ ${escapeHtml(v.name)}</b> <span class="ready">● Lista</span><div class="meta">Muestra almacenada localmente</div><audio controls preload="none"></audio><div><button data-r="${v.id}">🔄 Regrabar</button><button data-u="${v.id}">📁 Reemplazar archivo</button><button class="danger" data-d="${v.id}">🗑️ Eliminar</button></div>`;d.querySelector("audio").src=URL.createObjectURL(v.blob);el.appendChild(d)});el.querySelectorAll("[data-d]").forEach(b=>b.onclick=async()=>{if(confirm("¿Eliminar esta voz almacenada?")){await del(b.dataset.d);render()}});el.querySelectorAll("[data-r]").forEach(b=>b.onclick=()=>openRecorder(b.dataset.r));el.querySelectorAll("[data-u]").forEach(b=>b.onclick=()=>openRecorder(b.dataset.u))}
+
+async function saveVoiceBlob(blob,name,id){
+  if(!blob || !blob.size) throw Error("La grabación está vacía.");
+  await put({id:id||crypto.randomUUID(),name,blob,date:Date.now(),mime:blob.type||"audio/webm"});
+  await render();
+}
+
+function stopStream(){
+  if(stream){stream.getTracks().forEach(t=>t.stop());stream=null}
+}
+
+async function render(){
+  const list=await all(),el=$("voices");
+  el.innerHTML=list.length?"":"<p>Aún no hay voces almacenadas.</p>";
+
+  list.forEach(v=>{
+    const d=document.createElement("div");
+    d.className="voice";
+    const isRecordingThis=(recording || preparing) && editing===v.id;
+
+    d.innerHTML=`<b>🎙️ ${escapeHtml(v.name)}</b> <span class="ready">${preparing && editing===v.id ? "🎙️ Preparando..." : (recording && editing===v.id ? "🔴 Grabando..." : "● Lista")}</span>
+      <div class="meta">${preparing && editing===v.id ? "Preparando el micrófono..." : (recording && editing===v.id ? "La muestra anterior está oculta mientras grabas una nueva." : "Muestra almacenada localmente")}</div>
+      <audio controls preload="none" ${isRecordingThis?"hidden":""}></audio>
+      <div>
+        <button data-r="${v.id}">${isRecordingThis?"⏹ Detener":"🔄 Regrabar"}</button>
+        <button data-u="${v.id}" ${isRecordingThis?"disabled":""}>📁 Reemplazar archivo</button>
+        <button class="danger" data-d="${v.id}" ${isRecordingThis?"disabled":""}>🗑️ Eliminar</button>
+      </div>`;
+    const audio=d.querySelector("audio");
+    if(!isRecordingThis) audio.src=URL.createObjectURL(v.blob);
+    el.appendChild(d);
+  });
+
+  el.querySelectorAll("[data-d]").forEach(b=>b.onclick=async()=>{
+    if(confirm("¿Eliminar esta voz almacenada?")){
+      await del(b.dataset.d);
+      if(editing===b.dataset.d) cancelRecorder();
+      else await render();
+    }
+  });
+
+  el.querySelectorAll("[data-r]").forEach(b=>b.onclick=async()=>{
+    const id=b.dataset.r;
+    if(recording && editing===id){stopRecording();return}
+    await openRecorder(id);
+  });
+
+  el.querySelectorAll("[data-u]").forEach(b=>b.onclick=()=>openRecorder(b.dataset.u));
+}
+
 function escapeHtml(s){return String(s).replace(/[&<>'"]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;',"'":'&#39;','"':'&quot;'}[c]))}
-async function openRecorder(id=null){editing=id;const list=await all();const existing=list.find(v=>v.id===id);$("voiceName").value=existing?.name||"";$("consent").checked=false;$("recTitle").textContent=existing?"Regrabar voz":"Nueva voz";$("status").textContent=existing?"Graba una nueva muestra o sube un archivo para reemplazar la anterior.":"Listo para grabar o subir un archivo.";$("recorder").hidden=false}
+
+async function openRecorder(id=null){
+  if(recording) return;
+  editing=id;
+  const list=await all();
+  const existing=list.find(v=>v.id===id);
+
+  $("voiceName").value=existing?.name||"";
+  $("consent").checked=false;
+  $("recTitle").textContent=existing?"Regrabar voz":"Nueva voz";
+  $("record").textContent="🎙️ GRABAR MUESTRA";
+  $("status").textContent=existing
+    ?"Listo para regrabar. La muestra anterior se conservará hasta que termines correctamente."
+    :"Listo para grabar o subir un archivo.";
+  $("recorder").hidden=false;
+  await render();
+}
+
 $("addVoice").onclick=()=>openRecorder();
-$("cancel").onclick=()=>{if(stream)stream.getTracks().forEach(x=>x.stop());stream=null;rec=null;$("recorder").hidden=true;$("audioInput").value=""};
-$("record").onclick=async()=>{if(rec?.state==="recording"){rec.stop();return}if(!$("consent").checked){$("status").textContent="Marca la autorización primero.";return}const name=$("voiceName").value.trim();if(!name){$("status").textContent="Escribe un nombre para la voz.";return}try{stream=await navigator.mediaDevices.getUserMedia({audio:true});ch=[];rec=new MediaRecorder(stream);rec.ondataavailable=e=>{if(e.data.size)ch.push(e.data)};rec.onstop=async()=>{const blob=new Blob(ch,{type:rec.mimeType||"audio/webm"});await saveVoiceBlob(blob,name,editing);stream.getTracks().forEach(x=>x.stop());stream=null;rec=null;$("record").textContent="🎙️ GRABAR MUESTRA";$("recorder").hidden=true;$("status").textContent="Muestra guardada"};rec.start();$("record").textContent="⏹ DETENER GRABACIÓN";$("status").textContent="🔴 Grabando..."}catch(e){$("status").textContent="No se pudo acceder al micrófono."}};
-$("audioInput").onchange=async e=>{const file=e.target.files?.[0];if(!file)return;if(!$("consent").checked){$("status").textContent="Marca la autorización primero.";e.target.value="";return}const name=$("voiceName").value.trim()||"Mi voz";if(file.size>15*1024*1024){$("status").textContent="El archivo supera 15 MB.";return}if(!file.type.startsWith("audio/")){ $("status").textContent="Selecciona un archivo de audio válido.";return}try{await saveVoiceBlob(file,name,editing);$("recorder").hidden=true;$("status").textContent="Archivo de voz guardado."}catch(err){$("status").textContent="No se pudo guardar el archivo."}e.target.value=""};
+
+function cancelRecorder(){
+  pendingRecorderToken++;
+  preparing=false;
+  recording=false;
+  stopStream();
+  if(rec && rec.state!=="inactive"){try{rec.onstop=null;rec.stop()}catch{}}
+  rec=null;ch=[];recording=false;
+  $("record").textContent="🎙️ GRABAR MUESTRA";
+  $("recorder").hidden=true;
+  $("audioInput").value="";
+  render();
+}
+
+$("cancel").onclick=cancelRecorder;
+
+async function stopRecording(){
+  if(!rec || rec.state!=="recording") return;
+  $("status").textContent="⏳ Procesando la grabación...";
+  $("record").textContent="⏳ GUARDANDO...";
+  rec.stop();
+}
+
+$("record").onclick=async()=>{
+  if(recording){await stopRecording();return}
+  if(preparing)return;
+
+  if(!$("consent").checked){
+    $("status").textContent="Marca la autorización primero.";
+    return;
+  }
+
+  const name=$("voiceName").value.trim();
+  if(!name){
+    $("status").textContent="Escribe un nombre para la voz.";
+    return;
+  }
+
+  if(!navigator.mediaDevices?.getUserMedia){
+    $("status").textContent="Este navegador no permite acceder al micrófono.";
+    return;
+  }
+
+  const token=++pendingRecorderToken;
+
+  try{
+    $("status").textContent="🎙️ Solicitando permiso para usar el micrófono...";
+    $("record").textContent="⏳ PREPARANDO...";
+
+    // This call triggers the browser's microphone permission prompt when permission
+    // has not already been granted.
+    stream=await navigator.mediaDevices.getUserMedia({
+      audio:{
+        channelCount:1,
+        echoCancellation:true,
+        noiseSuppression:true,
+        autoGainControl:true
+      }
+    });
+
+    if(token!==pendingRecorderToken){stopStream();return}
+
+    ch=[];
+    const preferred=[
+      "audio/webm;codecs=opus",
+      "audio/webm",
+      "audio/mp4"
+    ];
+    const mime=preferred.find(x=>window.MediaRecorder?.isTypeSupported?.(x))||"";
+
+    rec=mime?new MediaRecorder(stream,{mimeType:mime}):new MediaRecorder(stream);
+    preparing=true;
+
+    // Hide the old player while the microphone settles. This short warm-up
+    // helps avoid the click/chillido that some phones produce at startup.
+    await render();
+    await new Promise(resolve=>setTimeout(resolve,700));
+    if(token!==pendingRecorderToken){stopStream();preparing=false;rec=null;await render();return}
+
+    rec.ondataavailable=e=>{if(e.data?.size)ch.push(e.data)};
+
+    rec.onerror=()=>{
+      $("status").textContent="❌ Ocurrió un error durante la grabación.";
+    };
+
+    rec.onstop=async()=>{
+      const localRec=rec;
+      const localStream=stream;
+      const parts=ch.slice();
+
+      rec=null;
+      stream=null;
+      recording=false;
+      preparing=false;
+      ch=[];
+
+      localStream?.getTracks().forEach(t=>t.stop());
+
+      $("record").textContent="🎙️ GRABAR MUESTRA";
+
+      try{
+        const blob=new Blob(parts,{type:localRec?.mimeType||"audio/webm"});
+        if(!blob.size) throw Error("La grabación está vacía.");
+
+        await saveVoiceBlob(blob,name,editing);
+        $("status").textContent="✅ Muestra guardada correctamente.";
+        $("recorder").hidden=true;
+      }catch(err){
+        $("status").textContent="❌ No se pudo guardar la grabación.";
+        await render();
+      }
+    };
+
+    rec.start(250);
+    preparing=false;
+    recording=true;
+    await render();
+    $("record").textContent="⏹ DETENER GRABACIÓN";
+    $("status").textContent="🔴 Grabando... Habla ahora.";
+  }catch(e){
+    stopStream();
+    rec=null;
+    recording=false;
+    preparing=false;
+    $("record").textContent="🎙️ GRABAR MUESTRA";
+
+    if(e?.name==="NotAllowedError" || e?.name==="PermissionDeniedError"){
+      $("status").textContent="❌ El micrófono no fue autorizado. Revisa el permiso de micrófono del navegador para esta página.";
+    }else if(e?.name==="NotFoundError"){
+      $("status").textContent="❌ No se encontró un micrófono disponible.";
+    }else{
+      $("status").textContent="❌ No se pudo acceder al micrófono.";
+    }
+    await render();
+  }
+};
+
+$("audioInput").onchange=async e=>{
+  const file=e.target.files?.[0];
+  if(!file)return;
+
+  if(!$("consent").checked){
+    $("status").textContent="Marca la autorización primero.";
+    e.target.value="";
+    return;
+  }
+
+  const name=$("voiceName").value.trim()||"Mi voz";
+
+  if(file.size>15*1024*1024){
+    $("status").textContent="El archivo supera 15 MB.";
+    e.target.value="";
+    return;
+  }
+
+  if(!file.type.startsWith("audio/")){
+    $("status").textContent="Selecciona un archivo de audio válido.";
+    e.target.value="";
+    return;
+  }
+
+  try{
+    await saveVoiceBlob(file,name,editing);
+    $("recorder").hidden=true;
+    $("status").textContent="✅ Archivo de voz guardado correctamente.";
+  }catch(err){
+    $("status").textContent="❌ No se pudo guardar el archivo.";
+  }
+  e.target.value="";
+};
+
 openDB().then(render);
+
